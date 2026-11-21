@@ -84,6 +84,68 @@ struct ResellerAccount: Decodable, Identifiable {
     let balance: Int
     let enabled: Bool
 }
+private struct ResellerAccountCard: View {
+    @ObservedObject var api: AdminAPI
+    let reseller: ResellerAccount
+    let onDelete: () -> Void
+    @State private var adjustment = ""
+    @State private var total = ""
+
+    var body: some View {
+        NeonPanel {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(reseller.username).font(.headline)
+                        Text(reseller.enabled ? "ACTIVO" : "SUSPENDIDO")
+                            .font(.caption).foregroundStyle(reseller.enabled ? .green : .orange)
+                    }
+                    Spacer()
+                    Text("\(reseller.balance) créditos").bold()
+                }
+                HStack {
+                    TextField("Cantidad (+ o -)", text: $adjustment)
+                        .keyboardType(.numbersAndPunctuation).pantherInput()
+                    Button("Aplicar ajuste") {
+                        guard let amount = Int(adjustment), amount != 0 else { return }
+                        Task {
+                            if await api.changeResellerBalance(reseller.id, adjustment: .delta(amount)) {
+                                adjustment = ""
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled((Int(adjustment) ?? 0) == 0)
+                }
+                HStack {
+                    TextField("Nuevo saldo total", text: $total)
+                        .keyboardType(.numberPad).pantherInput()
+                    Button("Fijar saldo") {
+                        guard let amount = Int(total), amount >= 0 else { return }
+                        Task {
+                            if await api.changeResellerBalance(reseller.id, adjustment: .total(amount)) {
+                                total = ""
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled((Int(total) ?? -1) < 0)
+                }
+                ResellerPatchPanel(api: api, reseller: reseller)
+                Button(reseller.enabled ? "Suspender cuenta" : "Activar cuenta") {
+                    Task { await api.setResellerEnabled(reseller.id, enabled: !reseller.enabled) }
+                }
+                .foregroundStyle(reseller.enabled ? .orange : .green)
+                Button(role: .destructive, action: onDelete) {
+                    Label("Eliminar cuenta", systemImage: "trash")
+                }
+                .foregroundStyle(.red)
+            }
+            .disabled(api.updatingReseller)
+        }
+    }
+}
+
 private struct ResellerPatchPanel: View {
     @ObservedObject var api: AdminAPI
     let reseller: ResellerAccount
@@ -137,6 +199,11 @@ private struct ResellerPatchPanel: View {
     }
 }
 
+enum ResellerBalanceAdjustment {
+    case delta(Int)
+    case total(Int)
+}
+
 private struct ResellerCreateBody: Encodable { let username: String; let password: String }
 private struct ResellerBalanceBody: Encodable { let delta: Int }
 private struct ResellerStatusBody: Encodable { let enabled: Bool }
@@ -152,6 +219,7 @@ private struct ResellerPriceBody: Encodable { let credits: Int }
     @Published var keys: [AdminKey] = []
     @Published var patches: [AdminPatch] = []
     @Published var resellers: [ResellerAccount] = []
+    @Published private(set) var updatingReseller = false
     @Published var message = "Configura tu servidor HTTPS y token de administrador."
     @Published var busy = false
     private func url(_ path: String) throws -> URL {
@@ -193,8 +261,12 @@ private struct ResellerPriceBody: Encodable { let credits: Int }
             message = "Permisos de patches vencidos eliminados."
         } catch { message = "Error al limpiar permisos: \(error.localizedDescription)" }
     }
+    private func refreshResellers() async throws {
+        let data = try await send("/admin/resellers")
+        resellers = try JSONDecoder().decode([ResellerAccount].self, from: data)
+    }
     func loadResellers() async {
-        do { resellers = try JSONDecoder().decode([ResellerAccount].self, from: try await send("/admin/resellers")) }
+        do { try await refreshResellers() }
         catch { message = "Revendedores: \(error.localizedDescription)" }
     }
     func createReseller(username: String, password: String) async {
@@ -204,12 +276,67 @@ private struct ResellerPriceBody: Encodable { let credits: Int }
             await loadResellers()
         } catch { message = "No se pudo crear: \(error.localizedDescription)" }
     }
-    func adjustReseller(_ id: String, delta: Int) async {
+    func changeResellerBalance(_ id: String, adjustment: ResellerBalanceAdjustment) async -> Bool {
+        guard !updatingReseller else { return false }
+        updatingReseller = true
+        defer { updatingReseller = false }
+
+        let delta: Int
         do {
-            _ = try await sendJSON("/admin/resellers/\(id)/balance", method: "POST", body: ResellerBalanceBody(delta: delta))
-            message = "Saldo actualizado."
+            switch adjustment {
+            case .delta(let amount):
+                delta = amount
+            case .total(let total):
+                try await refreshResellers()
+                guard let account = resellers.first(where: { $0.id == id }) else {
+                    message = "La cuenta ya no está disponible."
+                    return false
+                }
+                let result = total.subtractingReportingOverflow(account.balance)
+                guard total >= 0, !result.overflow else {
+                    message = "El nuevo saldo está fuera del rango permitido."
+                    return false
+                }
+                delta = result.partialValue
+            }
+
+            if delta != 0 {
+                _ = try await sendJSON("/admin/resellers/\(id)/balance", method: "POST", body: ResellerBalanceBody(delta: delta))
+            }
+        } catch {
+            message = "No se pudo confirmar el cambio de saldo: \(error.localizedDescription)"
+            return false
+        }
+
+        do {
+            if delta != 0 { try await refreshResellers() }
+            guard let account = resellers.first(where: { $0.id == id }) else {
+                message = "El servidor aceptó el ajuste, pero la cuenta ya no está disponible."
+                return true
+            }
+            if case .total(let requested) = adjustment, requested != account.balance {
+                message = "\(account.username) tiene \(account.balance) créditos. Se solicitó un total de \(requested)."
+            } else {
+                message = "\(account.username) tiene \(account.balance) créditos."
+            }
+        } catch {
+            message = "El servidor aceptó el ajuste. Pulsa Actualizar para consultar el saldo."
+        }
+        return true
+    }
+    func deleteReseller(_ account: ResellerAccount) async {
+        guard !updatingReseller else { return }
+        updatingReseller = true
+        defer { updatingReseller = false }
+
+        do {
+            _ = try await send("/admin/resellers/\(account.id)", method: "DELETE")
+            resellers.removeAll { $0.id == account.id }
+            message = "Cuenta \(account.username) eliminada."
             await loadResellers()
-        } catch { message = "No se pudo modificar el saldo: \(error.localizedDescription)" }
+        } catch {
+            message = "No se pudo confirmar la eliminación de \(account.username): \(error.localizedDescription)"
+        }
     }
     func setResellerEnabled(_ id: String, enabled: Bool) async {
         do {
@@ -413,7 +540,7 @@ struct AdminHome: View {
     @State private var tab: AdminTab = .home
     @State private var resellerUsername = ""
     @State private var resellerPassword = ""
-    @State private var resellerDelta: [String: String] = [:]
+    @State private var resellerToDelete: ResellerAccount?
     @State private var resellerPrices: [Int: String] = [1:"1",5:"3",30:"10"]
     @State private var label = ""
     @State private var days = 30
@@ -776,7 +903,7 @@ struct AdminHome: View {
                             resellerPassword = ""
                         }
                     }
-                    .disabled(resellerUsername.count < 3 || resellerPassword.count < 12 || api.token.isEmpty)
+                    .disabled(resellerUsername.count < 3 || resellerPassword.count < 12 || api.token.isEmpty || api.updatingReseller)
                 }
             }
             NeonPanel {
@@ -803,41 +930,28 @@ struct AdminHome: View {
                 Text("CUENTAS (\(api.resellers.count))").font(.headline)
                 Spacer()
                 Button("Actualizar") { Task { await api.loadResellers() } }
+                    .disabled(api.updatingReseller)
             }
             ForEach(api.resellers) { reseller in
-                NeonPanel {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(reseller.username).font(.headline)
-                                Text(reseller.enabled ? "ACTIVO" : "SUSPENDIDO")
-                                    .font(.caption).foregroundStyle(reseller.enabled ? .green : .orange)
-                            }
-                            Spacer()
-                            Text("\(reseller.balance) créditos").bold()
-                        }
-                        HStack {
-                            TextField("Cantidad (+ o -)", text: Binding(get: { resellerDelta[reseller.id] ?? "" }, set: { resellerDelta[reseller.id] = $0 }))
-                                .keyboardType(.numbersAndPunctuation).pantherInput()
-                            Button("Aplicar saldo") {
-                                if let amount = Int(resellerDelta[reseller.id] ?? ""), amount != 0 {
-                                    Task { await api.adjustReseller(reseller.id, delta: amount); resellerDelta[reseller.id] = "" }
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        ResellerPatchPanel(api: api, reseller: reseller)
-                        Button(reseller.enabled ? "Suspender cuenta" : "Activar cuenta") {
-                            Task { await api.setResellerEnabled(reseller.id, enabled: !reseller.enabled) }
-                        }
-                        .foregroundStyle(reseller.enabled ? .orange : .green)
-                    }
+                ResellerAccountCard(api: api, reseller: reseller) {
+                    resellerToDelete = reseller
                 }
             }
             if api.resellers.isEmpty { emptyNotice("Pulsa Actualizar para cargar los revendedores.") }
             Text(api.message).font(.caption).foregroundStyle(PantherStyle.pale)
         }
         .task { if !api.server.isEmpty && !api.token.isEmpty { await api.loadResellers() } }
+        .alert("Eliminar cuenta", isPresented: Binding(
+            get: { resellerToDelete != nil },
+            set: { if !$0 { resellerToDelete = nil } }
+        ), presenting: resellerToDelete) { account in
+            Button("Cancelar", role: .cancel) {}
+            Button("Eliminar definitivamente", role: .destructive) {
+                Task { await api.deleteReseller(account) }
+            }
+        } message: { account in
+            Text("¿Eliminar definitivamente la cuenta \(account.username)?")
+        }
     }
 
     private var tabBar: some View {
