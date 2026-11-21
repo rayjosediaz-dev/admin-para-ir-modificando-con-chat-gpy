@@ -1,0 +1,1 @@
+Corrección: reemplazado .fileImporter por UIDocumentPickerViewController presentado con .sheet. Se conserva validación .3105 y subida al servidor. No se modificaron los endpoints ni la configuración de Render. Requiere compilar y probar en iPhone.

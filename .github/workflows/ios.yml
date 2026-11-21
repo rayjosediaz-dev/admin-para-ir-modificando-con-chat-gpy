@@ -1,0 +1,36 @@
+name: Compilar Panther Admin y descargar IPA
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar XcodeGen
+        run: brew install xcodegen
+      - name: Generar proyecto
+        run: xcodegen generate
+      - name: Compilar sin firmar
+        run: |
+          xcodebuild -project PantherKeygarden.xcodeproj \
+            -scheme PantherKeygarden -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/PantherBuild" \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Crear IPA sin firmar
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/PantherBuild/Build/Products/Release-iphoneos/PantherKeygarden.app"
+          test -d "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/Panther-Keygarden-Admin-unsigned.ipa" Payload)
+          unzip -t "$GITHUB_WORKSPACE/Panther-Keygarden-Admin-unsigned.ipa" | tail -1
+      - name: Publicar IPA en Artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: Panther-Keygarden-Admin-unsigned
+          path: Panther-Keygarden-Admin-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,1 @@
+Al seleccionar Cuello.3105 se utiliza Cuello como nombre del nuevo patch, en lugar de Nuevo patch. Reemplazar archivo conserva el nombre del patch existente. No cambia Render ni endpoints. Pendiente compilar en Xcode y probar en iPhone.
