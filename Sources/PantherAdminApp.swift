@@ -88,7 +88,6 @@ private struct ResellerAccountCard: View {
     @ObservedObject var api: AdminAPI
     let reseller: ResellerAccount
     let onDelete: () -> Void
-    @State private var adjustment = ""
     @State private var total = ""
 
     var body: some View {
@@ -103,28 +102,15 @@ private struct ResellerAccountCard: View {
                     Spacer()
                     Text("\(reseller.balance) créditos").bold()
                 }
-                HStack {
-                    TextField("Cantidad (+ o -)", text: $adjustment)
-                        .keyboardType(.numbersAndPunctuation).pantherInput()
-                    Button("Aplicar ajuste") {
-                        guard let amount = Int(adjustment), amount != 0 else { return }
-                        Task {
-                            if await api.changeResellerBalance(reseller.id, adjustment: .delta(amount)) {
-                                adjustment = ""
-                            }
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled((Int(adjustment) ?? 0) == 0)
-                }
-                HStack {
-                    TextField("Nuevo saldo total", text: $total)
+                Text("SALDO DE CRÉDITOS").font(.caption).foregroundStyle(PantherStyle.pale)
+                HStack(spacing: 8) {
+                    TextField("Cantidad de créditos", text: $total)
                         .keyboardType(.numberPad).pantherInput()
-                    Button("Fijar saldo") {
+                    Button("Guardar") {
                         guard let amount = Int(total), amount >= 0 else { return }
                         Task {
                             if await api.changeResellerBalance(reseller.id, adjustment: .total(amount)) {
-                                total = ""
+                                total = String(api.resellers.first(where: { $0.id == reseller.id })?.balance ?? amount)
                             }
                         }
                     }
